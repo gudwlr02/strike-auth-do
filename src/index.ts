@@ -30,7 +30,7 @@ type Env = {
 	MY_DURABLE_OBJECT: DurableObjectNamespace<MyDurableObject>;
 };
 
-export class MyDurableObject extends DurableObject<Env> {
+export class MyDurableObject extends DurableObject {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 	}
@@ -215,7 +215,7 @@ export default {
 
 			const getStubByIp = (ip: string) => {
 				const id = env.MY_DURABLE_OBJECT.idFromName(ip);
-				return env.MY_DURABLE_OBJECT.get(id);
+				return env.MY_DURABLE_OBJECT.get(id) as any;
 			};
 
 			const writeIndex = async (ip: string, record: AuthRecord) => {
