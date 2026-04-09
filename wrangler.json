@@ -4,27 +4,27 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-10-08",
   "upload_source_maps": true,
-  "migrations": [
-    {
-      "new_sqlite_classes": ["MyDurableObject"],
-      "tag": "v1"
-    }
-  ],
+  "observability": {
+    "enabled": true
+  },
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "MyDurableObject",
-        "name": "MY_DURABLE_OBJECT"
+        "name": "MY_DURABLE_OBJECT",
+        "class_name": "MyDurableObject"
       }
     ]
   },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MyDurableObject"]
+    }
+  ],
   "kv_namespaces": [
     {
       "binding": "AUTH_KV",
       "id": "60ab8a99ffb8389bf69049d5f7ec7a51"
     }
-  ],
-  "observability": {
-    "enabled": true
-  }
+  ]
 }
