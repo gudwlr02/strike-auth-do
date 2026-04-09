@@ -1,71 +1,254 @@
 import { DurableObject } from "cloudflare:workers";
 
-/**
- * Welcome to Cloudflare Workers! This is your first Durable Objects application.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your Durable Object in action
- * - Run `npm run deploy` to publish your application
- *
- * Bind resources to your worker in `wrangler.jsonc`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/durable-objects
- */
+const ADMIN_SECRET_FALLBACK = "5821";
+const TTL_MS = 24 * 60 * 60 * 1000;
 
-/** A Durable Object's behavior is defined in an exported Javascript class */
+type AuthStatus = "pending" | "approved" | "blocked" | "expired";
+
+type AuthRecord = {
+	status: AuthStatus;
+	name: string;
+	contact: string;
+	appliedAt: number | null;
+	approvedAt: number | null;
+};
+
 export class MyDurableObject extends DurableObject<Env> {
-	/**
-	 * The constructor is invoked once upon creation of the Durable Object, i.e. the first call to
-	 * 	`DurableObjectStub::get` for a given identifier (no-op constructors can be omitted)
-	 *
-	 * @param ctx - The interface for interacting with Durable Object state
-	 * @param env - The interface to reference bindings declared in wrangler.jsonc
-	 */
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 	}
 
-	/**
-	 * The Durable Object exposes an RPC method sayHello which will be invoked when a Durable
-	 *  Object instance receives a request from a Worker via the same method invocation on the stub
-	 *
-	 * @returns The greeting to be sent back to the Worker
-	 */
-	async sayHello(): Promise<string> {
-		let result = this.ctx.storage.sql
-			.exec("SELECT 'Hello, World!' as greeting")
-			.one() as { greeting: string };
-		return result.greeting;
+	private normalizeRecord(record: unknown): AuthRecord | null {
+		if (!record || typeof record !== "object") return null;
+
+		const r = record as Partial<AuthRecord>;
+		return {
+			status: (r.status as AuthStatus) || "pending",
+			name: String(r.name || "").slice(0, 30),
+			contact: String(r.contact || "").slice(0, 50),
+			appliedAt: Number(r.appliedAt || 0) || null,
+			approvedAt: Number(r.approvedAt || 0) || null,
+		};
+	}
+
+	private async getStoredRecord(): Promise<AuthRecord | null> {
+		const record = await this.ctx.storage.get<AuthRecord>("record");
+		return this.normalizeRecord(record);
+	}
+
+	private async putStoredRecord(record: AuthRecord): Promise<void> {
+		await this.ctx.storage.put("record", this.normalizeRecord(record));
+	}
+
+	private async withExpiration(record: AuthRecord | null): Promise<AuthRecord | null> {
+		const normalized = this.normalizeRecord(record);
+		if (!normalized) return null;
+
+		if (
+			normalized.status === "approved" &&
+			normalized.approvedAt &&
+			Date.now() - normalized.approvedAt > TTL_MS
+		) {
+			normalized.status = "expired";
+			await this.putStoredRecord(normalized);
+		}
+
+		return normalized;
+	}
+
+	async getRecord(): Promise<AuthRecord | null> {
+		return this.withExpiration(await this.getStoredRecord());
+	}
+
+	async apply(name: string, contact: string): Promise<{ status: string; record?: AuthRecord; error?: string }> {
+		const safeName = String(name || "").trim().slice(0, 30);
+		const safeContact = String(contact || "").trim().slice(0, 50);
+
+		if (!safeName || !safeContact) {
+			return { status: "error", error: "이름과 연락처를 입력해주세요." };
+		}
+
+		const existing = await this.withExpiration(await this.getStoredRecord());
+
+		if (existing) {
+			if (existing.status === "pending") return { status: "already_pending", record: existing };
+			if (existing.status === "approved") return { status: "already_approved", record: existing };
+			if (existing.status === "blocked") return { status: "blocked", record: existing };
+		}
+
+		const record: AuthRecord = {
+			status: "pending",
+			name: safeName,
+			contact: safeContact,
+			appliedAt: Date.now(),
+			approvedAt: null,
+		};
+
+		await this.putStoredRecord(record);
+		return { status: "applied", record };
+	}
+
+	async approve(): Promise<{ success: true; record: AuthRecord }> {
+		const existing = await this.withExpiration(await this.getStoredRecord());
+
+		const updated: AuthRecord = {
+			status: "approved",
+			name: existing?.name || "",
+			contact: existing?.contact || "",
+			appliedAt: existing?.appliedAt || Date.now(),
+			approvedAt: Date.now(),
+		};
+
+		await this.putStoredRecord(updated);
+		return { success: true, record: updated };
+	}
+
+	async extend(): Promise<{ success?: true; record?: AuthRecord; error?: string }> {
+		const existing = await this.withExpiration(await this.getStoredRecord());
+		if (!existing) {
+			return { error: "존재하지 않는 IP" };
+		}
+
+		const updated: AuthRecord = {
+			...existing,
+			status: "approved",
+			approvedAt: Date.now(),
+		};
+
+		await this.putStoredRecord(updated);
+		return { success: true, record: updated };
+	}
+
+	async block(): Promise<{ success: true; record: AuthRecord }> {
+		const existing = await this.withExpiration(await this.getStoredRecord());
+
+		const updated: AuthRecord = {
+			status: "blocked",
+			name: existing?.name || "",
+			contact: existing?.contact || "",
+			appliedAt: existing?.appliedAt || Date.now(),
+			approvedAt: existing?.approvedAt || null,
+		};
+
+		await this.putStoredRecord(updated);
+		return { success: true, record: updated };
+	}
+
+	async deleteRecord(): Promise<{ success: true }> {
+		await this.ctx.storage.delete("record");
+		return { success: true };
 	}
 }
 
 export default {
-	/**
-	 * This is the standard fetch handler for a Cloudflare Worker
-	 *
-	 * @param request - The request submitted to the Worker from the client
-	 * @param env - The interface to reference bindings declared in wrangler.jsonc
-	 * @param ctx - The execution context of the Worker
-	 * @returns The response to be sent back to the client
-	 */
-	async fetch(request, env, ctx): Promise<Response> {
-		// Create a `DurableObjectId` for an instance of the `MyDurableObject`
-		// class. The name of class is used to identify the Durable Object.
-		// Requests from all Workers to the instance named
-		// will go to a single globally unique Durable Object instance.
-		const id: DurableObjectId = env.MY_DURABLE_OBJECT.idFromName(
-			new URL(request.url).pathname,
-		);
+	async fetch(request: Request, env: Env): Promise<Response> {
+		const corsHeaders = {
+			"Access-Control-Allow-Origin": "*",
+			"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+			"Access-Control-Allow-Headers": "Content-Type, X-Admin-Secret",
+		};
 
-		// Create a stub to open a communication channel with the Durable
-		// Object instance.
-		const stub = env.MY_DURABLE_OBJECT.get(id);
+		const json = (data: unknown, status = 200) =>
+			new Response(JSON.stringify(data), {
+				status,
+				headers: {
+					...corsHeaders,
+					"Content-Type": "application/json; charset=utf-8",
+					"Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+					Pragma: "no-cache",
+					Expires: "0",
+				},
+			});
 
-		// Call the `sayHello()` RPC method on the stub to invoke the method on
-		// the remote Durable Object instance
-		const greeting = await stub.sayHello();
+		const url = new URL(request.url);
+		const path = url.pathname;
+		const method = request.method;
+		const adminSecret = env.ADMIN_SECRET || ADMIN_SECRET_FALLBACK;
 
-		return new Response(greeting);
+		if (method === "OPTIONS") {
+			return new Response(null, { headers: corsHeaders });
+		}
+
+		const isAdmin = () =>
+			request.headers.get("X-Admin-Secret") === adminSecret ||
+			url.searchParams.get("secret") === adminSecret;
+
+		const getClientIp = () => {
+			const ip = request.headers.get("CF-Connecting-IP");
+			return ip ? ip.trim() : null;
+		};
+
+		const getStubByIp = (ip: string) => {
+			const id = env.MY_DURABLE_OBJECT.idFromName(ip);
+			return env.MY_DURABLE_OBJECT.get(id);
+		};
+
+		if (path === "/check" && method === "GET") {
+			const ip = getClientIp();
+			if (!ip) return json({ error: "IP 확인 불가" }, 400);
+
+			const stub = getStubByIp(ip);
+			const record = await stub.getRecord();
+
+			if (!record) return json({ status: "unregistered" });
+			if (record.status === "blocked") return json({ status: "blocked" });
+
+			if (record.status === "approved") {
+				const remainMs = Math.max(0, TTL_MS - (Date.now() - (record.approvedAt || 0)));
+				return json({ status: "approved", remainMs });
+			}
+
+			return json({ status: record.status });
+		}
+
+		if (path === "/apply" && method === "POST") {
+			const ip = getClientIp();
+			if (!ip) return json({ error: "IP 확인 불가" }, 400);
+
+			const body = (await request.json().catch(() => ({}))) as {
+				name?: string;
+				contact?: string;
+			};
+
+			const stub = getStubByIp(ip);
+			const result = await stub.apply(body.name || "", body.contact || "");
+
+			return json(result, result.error ? 400 : 200);
+		}
+
+		if (path.startsWith("/admin/") && method === "POST") {
+			if (!isAdmin()) return json({ error: "Unauthorized" }, 401);
+
+			const body = (await request.json().catch(() => ({}))) as { ip?: string };
+			const ip = String(body?.ip || "").trim();
+			if (!ip) return json({ error: "IP 없음" }, 400);
+
+			const stub = getStubByIp(ip);
+			const action = path.replace("/admin/", "");
+
+			if (action === "approve") {
+				const result = await stub.approve();
+				return json({ success: true, ip, ...result });
+			}
+
+			if (action === "extend") {
+				const result = await stub.extend();
+				return json(result.error ? { ip, ...result } : { success: true, ip, ...result }, result.error ? 404 : 200);
+			}
+
+			if (action === "block") {
+				const result = await stub.block();
+				return json({ success: true, ip, ...result });
+			}
+
+			if (action === "delete") {
+				const result = await stub.deleteRecord();
+				return json({ success: true, ip, ...result });
+			}
+
+			return json({ error: "알 수 없는 액션" }, 400);
+		}
+
+		return json({ error: "Not Found" }, 404);
 	},
 } satisfies ExportedHandler<Env>;
