@@ -24,6 +24,12 @@ type ActionResult =
 	| { success: true; record: AuthRecord }
 	| { success: false; error: string };
 
+type Env = {
+	ADMIN_SECRET?: string;
+	AUTH_KV: KVNamespace;
+	MY_DURABLE_OBJECT: DurableObjectNamespace<MyDurableObject>;
+};
+
 export class MyDurableObject extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
